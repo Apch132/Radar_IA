@@ -1,0 +1,493 @@
+// Radar IA — modèles Prisma
+// Collecte brute (004.1F) + articles normalisés (005.1A)
+// + dossiers / décisions de rapprochement (006.1B)
+// + tentatives d'analyse IA (007.1B)
+// + publication Discord (008.1B — FolderPublication / PublicationAttempt)
+// + administration (009.1B — PipelineRun / PipelineLock / AdminOperationLog
+//   + backoff CollectedSourceState).
+// Pas de client Ollama, ni pipeline d'inférence, ni appels Discord.
+// Pas d'orchestration de cycle ni de commandes Discord (009.1B = persistance seule).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Une ligne par source — état d'exécution (incrémental + backoff runtime, 009.1B).
+/// Définition source (enabled, url, …) = fichier registre ; ici = exécution seule.
+model CollectedSourceState {
+  sourceId             String    @id
+  etag                 String?
+  lastModified         String?
+  lastCollectedAt      DateTime?
+  lastSuccessfulAt     DateTime?
+  lastHttpStatus       Int?
+  /// Compteur d'échecs consécutifs de collecte (reset sur succès).
+  consecutiveFailures  Int       @default(0)
+  /// Prochaine échéance d'éligibilité (backoff). Null = pas de backoff actif.
+  nextEligibleAt       DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@index([nextEligibleAt])
+}
+
+/// Snapshot append-only du corps brut reçu lors d'une collecte.
+model RawFeedSnapshot {
+  id             String   @id @default(cuid())
+  sourceId       String
+  collectedAt    DateTime
+  httpStatus     Int
+  etag           String?
+  lastModified   String?
+  finalUrl       String?
+  feedFormat     String?
+  rawBody        String   @db.Text
+  parseSucceeded Boolean
+  errorMessage   String?
+
+  @@index([sourceId, collectedAt])
+}
+
+/// Article normalisé (contrat NormalizedArticle — étape 005.1A).
+/// Identité technique : sourceId+externalId si présent, sinon sourceId+url.
+/// Index uniques partiels PostgreSQL définis dans la migration SQL
+/// (non exprimables nativement dans le schéma Prisma).
+model NormalizedArticle {
+  id                 String    @id @default(cuid())
+  sourceId           String
+  sourceTier         String
+  externalId         String?
+  title              String
+  url                String
+  publishedAt        DateTime?
+  /// Horodatage métier issu du flux (pas le timestamp technique Prisma).
+  updatedAt          DateTime?
+  author             String?
+  summary            String?   @db.Text
+  content            String?   @db.Text
+  categories         String[]
+  feedFormat         String
+  createdAt          DateTime  @default(now())
+  /// Dernière persistance technique (création ou mise à jour).
+  persistedUpdatedAt DateTime  @updatedAt
+
+  folderMemberships  NewsFolderArticle[]
+  matchingDecisions  MatchingDecision[]
+
+  @@index([sourceId])
+  @@index([sourceId, publishedAt])
+}
+
+/// États métier du dossier (gel 006.1A).
+enum NewsFolderStatus {
+  open
+  idle
+  closed
+}
+
+/// Rôle d'appartenance article ↔ dossier (création / enrichissement).
+enum NewsFolderArticleRole {
+  primary
+  enrichment
+}
+
+/// Issues de décision backend (gel 006.1A).
+enum MatchingDecisionIssue {
+  create_dossier
+  attach_enrich
+  duplicate_editorial
+  ambiguous_no_action
+}
+
+/// Confiance qualitative de rapprochement (gel 006.1A).
+enum MatchingConfidence {
+  high
+  medium
+  low
+  none
+}
+
+/// Dossier d'actualité — matérialisation d'un événement (006.1B).
+model NewsFolder {
+  id             String           @id @default(cuid())
+  status         NewsFolderStatus @default(open)
+  /// Libellé courant du dossier (révisable).
+  title          String
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  /// Dernière activité métier (création / enrichissement).
+  lastActivityAt DateTime
+  closedAt       DateTime?
+
+  articles             NewsFolderArticle[]
+  decisions            MatchingDecision[]
+  analysisAttempts  AnalysisAttempt[]
+  folderPublication    FolderPublication?
+  publicationAttempts  PublicationAttempt[]
+
+  @@index([status])
+  @@index([lastActivityAt])
+  @@index([status, lastActivityAt])
+}
+
+/// Appartenance enrichissante article ↔ dossier (unicité active par article).
+model NewsFolderArticle {
+  id              String                @id @default(cuid())
+  folderId        String
+  articleId       String
+  role            NewsFolderArticleRole
+  /// Type d'apport (ex. correction, confirmation) — libre, codes métier.
+  enrichmentType  String?
+  /// Faits / enrichissements retenus (JSON structuré minimal).
+  enrichmentFacts Json?
+  attachedAt      DateTime              @default(now())
+
+  folder  NewsFolder        @relation(fields: [folderId], references: [id], onDelete: Restrict)
+  article NormalizedArticle @relation(fields: [articleId], references: [id], onDelete: Restrict)
+
+  /// Un article n'appartient qu'à un seul dossier (appartenance active).
+  @@unique([articleId])
+  @@unique([folderId, articleId])
+  @@index([folderId])
+}
+
+/// Historique append-only des décisions de rapprochement (jamais écrasé).
+model MatchingDecision {
+  id                  String                 @id @default(cuid())
+  issue               MatchingDecisionIssue
+  articleId           String
+  /// Dossier cible si identifié (obligatoire pour attach/duplicate ; optionnel si ambiguous).
+  folderId            String?
+  confidence          MatchingConfidence
+  /// Motifs structurés (codes).
+  motiveCodes         String[]
+  favorableSignals    String[]
+  unfavorableSignals  String[]
+  /// Faits nouveaux retenus (attach_enrich) — JSON structuré minimal.
+  enrichmentFacts     Json?
+  /// Origine d'une proposition consultée : rule | llm_assist | null.
+  proposalOrigin      String?
+  reevaluable         Boolean                @default(true)
+  decidedAt           DateTime               @default(now())
+
+  article NormalizedArticle @relation(fields: [articleId], references: [id], onDelete: Restrict)
+  folder  NewsFolder?       @relation(fields: [folderId], references: [id], onDelete: Restrict)
+
+  @@index([articleId, decidedAt])
+  @@index([folderId, decidedAt])
+  @@index([issue, decidedAt])
+}
+
+/// Statut de validation backend (gel 007.1A).
+enum AnalysisValidationStatus {
+  accepted
+  accepted_with_warnings
+  rejected
+}
+
+/// Décision de publication backend (gel 007.1A) — absente tant que non produite.
+enum PublicationDecision {
+  publish
+  enrich_thread_only
+  hold
+  reject_editorial
+}
+
+/// Codes d'erreur fermés V1 (gel 007.1A §14.1).
+enum AnalysisErrorCode {
+  not_eligible
+  enrichment_immaterial
+  queue_timeout
+  ollama_unavailable
+  inference_timeout
+  invalid_json
+  schema_violation
+  empty_summary
+  context_too_large
+  model_mismatch
+  analysis_exhausted
+}
+
+/// Codes de warning fermés V1 (gel 007.1A §14.2).
+enum AnalysisWarningCode {
+  facts_dropped
+  entities_deduplicated
+}
+
+/// Historique append-only des tentatives / résultats d'analyse IA (007.1B).
+/// Une ligne = une tentative ; jamais écrasée. Proposition / scoring en JSON.
+model AnalysisAttempt {
+  id                    String                    @id @default(cuid())
+  folderId              String
+  /// Empreinte d'agrégat SHA-256 hex (64 caractères).
+  aggregateFingerprint  String
+  /// Numéro de tentative pour (folderId, aggregateFingerprint), strictement > 0.
+  attemptNumber         Int
+  analyzedAt            DateTime                  @default(now())
+  /// Tag Ollama effectif si un appel modèle a été tenté.
+  modelId               String?
+  /// Origine de proposition — V1 : uniquement "llm".
+  proposalOrigin        String                    @default("llm")
+  validationStatus      AnalysisValidationStatus
+  /// AnalysisProposalV1 JSON ; absent uniquement pour échec pré-parse.
+  proposal              Json?
+  /// BackendScoringV1 JSON ; obligatoire si accepted / accepted_with_warnings.
+  backendScoring        Json?
+  errorCodes            AnalysisErrorCode[]
+  warnings              AnalysisWarningCode[]
+  /// ProposedFactV1[] écartés par ancrage.
+  droppedFacts          Json
+  /// Décision publication backend ; optionnelle tant que non produite.
+  publicationDecision   PublicationDecision?
+  createdAt             DateTime                  @default(now())
+
+  folder                   NewsFolder          @relation(fields: [folderId], references: [id], onDelete: Restrict)
+  sourcedFolderPublications FolderPublication[] @relation("FolderPublicationSourceAnalysis")
+  publicationAttempts      PublicationAttempt[] @relation("PublicationAttemptAnalysis")
+
+  @@unique([folderId, aggregateFingerprint, attemptNumber])
+  @@index([folderId])
+  @@index([folderId, aggregateFingerprint])
+  @@index([folderId, analyzedAt])
+  @@index([folderId, validationStatus, analyzedAt])
+  @@index([folderId, aggregateFingerprint, publicationDecision])
+}
+
+/// Statut courant de publication Discord d'un dossier (gel 008.1A §3.1).
+enum PublicationStatus {
+  none
+  pending
+  partial
+  main_published
+  failed
+  inconsistent
+}
+
+/// Type d'opération de publication (gel 008.1A §4.2).
+enum PublicationOperationKind {
+  publish
+  create_thread
+  enrich
+  unarchive
+  reconcile
+}
+
+/// Statut d'une tentative de publication (gel 008.1A §4.2).
+enum PublicationAttemptStatus {
+  reserved
+  succeeded
+  failed
+  skipped
+}
+
+/// Codes d'erreur / skip publication (gel 008.1A §11.3).
+enum PublicationErrorCode {
+  folder_closed
+  precondition_failed
+  channel_unmapped
+  channel_unavailable
+  missing_permission
+  discord_rate_limited
+  discord_timeout
+  discord_unavailable
+  persist_failed
+  inconsistent_state
+  idempotent_hit
+  hold
+  reject_editorial
+  unknown
+}
+
+/// État courant de publication Discord d'un dossier (008.1B).
+/// Au plus une ligne par dossier. `hasMainPublication` est dérivé
+/// (mainMessageId != null && status ∈ {partial, main_published, inconsistent}).
+model FolderPublication {
+  id                       String            @id @default(cuid())
+  folderId                 String            @unique
+  status                   PublicationStatus @default(none)
+  /// Snowflake Discord — toujours String.
+  guildId                  String
+  channelId                String?
+  mainMessageId            String?
+  threadId                 String?
+  /// Tentative 007 du publish réussi / en cours.
+  sourceAnalysisAttemptId  String?
+  lastErrorCode            PublicationErrorCode?
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+  lastActivityAt           DateTime          @default(now())
+
+  folder                 NewsFolder          @relation(fields: [folderId], references: [id], onDelete: Restrict)
+  sourceAnalysisAttempt  AnalysisAttempt?    @relation("FolderPublicationSourceAnalysis", fields: [sourceAnalysisAttemptId], references: [id], onDelete: Restrict)
+  attempts               PublicationAttempt[]
+
+  @@index([status])
+  @@index([status, updatedAt])
+  @@index([folderId, status])
+  @@index([sourceAnalysisAttemptId])
+}
+
+/// Historique append-only des tentatives de publication Discord (008.1B).
+/// Création seule côté métier ; transitions de statut réservation → terminal
+/// autorisées sur la ligne courante. Unicité active (reserved|succeeded)
+/// sur idempotencyKey via index partiel SQL (migration).
+model PublicationAttempt {
+  id                   String                   @id @default(cuid())
+  folderPublicationId  String
+  folderId             String
+  kind                 PublicationOperationKind
+  /// Numéro de tentative pour une clé d'idempotence, strictement > 0.
+  attemptNumber        Int
+  idempotencyKey       String
+  analysisAttemptId    String?
+  /// Empreinte d'événement (enrich) — gel 008.1A §2 / §9.2.
+  eventFingerprint     String?
+  status               PublicationAttemptStatus
+  discordMessageId     String?
+  discordThreadId      String?
+  errorCode            PublicationErrorCode?
+  retryable            Boolean                  @default(false)
+  nextAttemptAt        DateTime?
+  /// Durée technique utile (ms), optionnelle.
+  durationMs           Int?
+  /// Lease d'exécution Discord (010.1A AUD-002) — un seul exécuteur actif.
+  executionHolderId        String?
+  executionLeaseExpiresAt  DateTime?
+  attemptedAt          DateTime                 @default(now())
+  createdAt            DateTime                 @default(now())
+
+  folderPublication  FolderPublication @relation(fields: [folderPublicationId], references: [id], onDelete: Restrict)
+  folder             NewsFolder        @relation(fields: [folderId], references: [id], onDelete: Restrict)
+  analysisAttempt    AnalysisAttempt?  @relation("PublicationAttemptAnalysis", fields: [analysisAttemptId], references: [id], onDelete: Restrict)
+
+  @@unique([idempotencyKey, attemptNumber])
+  @@index([folderId])
+  @@index([folderPublicationId, attemptedAt])
+  @@index([folderId, attemptedAt])
+  @@index([idempotencyKey])
+  @@index([eventFingerprint])
+  @@index([status, retryable, nextAttemptAt])
+  @@index([folderId, kind, status])
+  @@index([analysisAttemptId])
+  @@index([status, executionLeaseExpiresAt])
+}
+
+/// Statut d'une exécution de cycle global (gel 009.1A §7 / §15).
+enum PipelineRunStatus {
+  running
+  completed
+  failed
+  degraded
+}
+
+/// Origine du déclenchement d'un cycle (gel 009.1A §6 / §8).
+enum PipelineRunTrigger {
+  scheduled
+  manual
+  cli
+}
+
+/// Historique append-oriented des exécutions de pipeline (009.1B).
+/// Une ligne = un cycle ; le résumé JSON est optionnel jusqu'à clôture.
+model PipelineRun {
+  id           String             @id @default(cuid())
+  status       PipelineRunStatus
+  trigger      PipelineRunTrigger
+  /// Identité du processus détenteur (worker id / hostname+pid).
+  holderId     String
+  startedAt    DateTime           @default(now())
+  finishedAt   DateTime?
+  /// Dernier heartbeat pendant `running` (récupération TTL / single-flight).
+  heartbeatAt  DateTime           @default(now())
+  /// Compteurs / synthèse de run (sources OK/KO, articles, matching, …).
+  summary      Json?
+  errorMessage String?            @db.Text
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  lock              PipelineLock?
+  adminOperations   AdminOperationLog[]
+
+  @@index([status, heartbeatAt])
+  @@index([startedAt])
+  @@index([status, startedAt])
+  @@index([holderId, startedAt])
+}
+
+/// Verrou single-flight singleton (gel 009.1A §8 / A06).
+/// Une seule ligne (`id = "global"`). Pas de verrou mémoire-seul.
+model PipelineLock {
+  /// Clé singleton V1.
+  id          String    @id
+  runId       String?   @unique
+  holderId    String?
+  acquiredAt  DateTime?
+  heartbeatAt DateTime?
+  /// Expiration soft (TTL) — le caller fournit / met à jour.
+  expiresAt   DateTime?
+
+  run PipelineRun? @relation(fields: [runId], references: [id], onDelete: SetNull)
+}
+
+/// Verrou d'inférence Ollama cross-process (010.1A AUD-003).
+/// Singleton `id = "ollama"` — au plus une inférence globale.
+model InferenceLock {
+  id           String    @id
+  holderId     String?
+  acquiredAt   DateTime?
+  expiresAt    DateTime?
+  heartbeatAt  DateTime?
+}
+
+/// Familles d'ops manuelles tracées (gel 009.1A §11).
+enum AdminOperationKind {
+  run_cycle
+  collect_source
+  force_reanalysis
+  resume_publication
+  force_retry_publication
+  reconcile
+  force_republish
+  set_folder_status
+  reconcile_ids
+  clear_source_backoff
+}
+
+/// Issue d'une ops administrative (gel 009.1A §2 — audit).
+enum AdminOperationOutcome {
+  accepted
+  rejected
+  succeeded
+  failed
+  skipped
+}
+
+/// Journal append-only des opérations administratives (009.1B).
+/// Création seule — jamais d'update / delete métier.
+model AdminOperationLog {
+  id            String                @id @default(cuid())
+  /// ID utilisateur Discord allowlisté, ou acteur technique (`cli`, `worker`).
+  actorId       String
+  kind          AdminOperationKind
+  /// Cible structurée (folderId, sourceId, runId, …) — JSON minimal.
+  target        Json
+  outcome       AdminOperationOutcome
+  /// Détail / code normalisé (pas de secrets).
+  detail        String?               @db.Text
+  pipelineRunId String?
+  requestedAt   DateTime              @default(now())
+  createdAt     DateTime              @default(now())
+
+  pipelineRun PipelineRun? @relation(fields: [pipelineRunId], references: [id], onDelete: Restrict)
+
+  @@index([requestedAt])
+  @@index([actorId, requestedAt])
+  @@index([kind, requestedAt])
+  @@index([pipelineRunId])
+  @@index([outcome, requestedAt])
+}

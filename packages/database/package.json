@@ -1,0 +1,37 @@
+{
+  "name": "@radar-ia/database",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "prisma"
+  ],
+  "scripts": {
+    "prisma:generate": "node --env-file=../../.env ./scripts/run-prisma.mjs generate",
+    "prisma:validate": "node --env-file=../../.env ./scripts/run-prisma.mjs validate",
+    "prisma:migrate:dev": "node --env-file=../../.env ./scripts/run-prisma.mjs migrate dev",
+    "prisma:migrate:deploy": "node --env-file=../../.env ./scripts/run-prisma.mjs migrate deploy",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "npm run prisma:generate && tsc -p tsconfig.json",
+    "test": "vitest run",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "@radar-ia/analysis": "*",
+    "@radar-ia/shared": "*"
+  },
+  "devDependencies": {
+    "prisma": "^6.19.3",
+    "vitest": "^3.2.7"
+  }
+}

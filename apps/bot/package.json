@@ -1,0 +1,41 @@
+{
+  "name": "@radar-ia/bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./publication": {
+      "types": "./dist/publication/index.d.ts",
+      "import": "./dist/publication/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "node --env-file=../../.env --import tsx --watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node --env-file=../../.env dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@radar-ia/analysis": "*",
+    "@radar-ia/collector": "*",
+    "@radar-ia/config": "*",
+    "@radar-ia/database": "*",
+    "@radar-ia/shared": "*",
+    "discord.js": "^14.27.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.3",
+    "vitest": "^3.2.7"
+  }
+}

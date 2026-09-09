@@ -1,0 +1,117 @@
+# Radar IA — infrastructure d'exploitation Ubuntu (validée)
+# PostgreSQL + bot Discord permanents ; worker pipeline optionnel (profile worker).
+# API reste un processus hôte (`npm run dev -w @radar-ia/api`).
+# Bot : Docker = mode normal ; `npm run dev -w @radar-ia/bot` = développement uniquement.
+#
+# Usage :
+#   1. cp .env.example .env   (secrets hors dépôt — jamais committer)
+#   2. npm install && npm run build   (prérequis mount :ro — dist/ requis)
+#   3. docker compose up -d                    → postgres + bot
+#   4. docker compose --profile worker up -d worker   → cycle auto (optionnel)
+#   5. docker compose down
+#
+# Runtime validé (Linux / Ubuntu) :
+#   - bot + worker : network_mode: host
+#   - PostgreSQL : bind loopback 127.0.0.1 ; données via POSTGRES_DATA_PATH
+#     (défaut ./data/postgres ; chemin d'exploitation à définir dans .env local)
+#   - Ollama hôte : OLLAMA_BASE_URL=http://127.0.0.1:11434 (pas host.docker.internal)
+#   - worker : 1er cycle ~5 s après ready, puis toutes les 15 min (défauts config)
+#
+# network_mode: host est spécifique Linux ; ne pas attendre le même comportement
+# sous Docker Desktop Windows/macOS.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: radar-ia-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    # AUD-006: bind loopback only — never expose Postgres on all interfaces.
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # Données hors dépôt. Surcharger POSTGRES_DATA_PATH dans .env (non versionné)
+      # pour un chemin d'exploitation spécifique.
+      - ${POSTGRES_DATA_PATH:-./data/postgres}:/var/lib/postgresql/data
+    networks:
+      - radar-ia
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  bot:
+    image: node:20-bookworm
+    container_name: radar-ia-bot
+    working_dir: /app
+    restart: unless-stopped
+    network_mode: host
+    user: "node"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
+      SOURCES_REGISTRY_PATH: ${SOURCES_REGISTRY_PATH:-config/sources.json}
+      OLLAMA_BASE_URL: http://127.0.0.1:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-ministral-3:3b}
+      OLLAMA_MAX_CONCURRENCY: ${OLLAMA_MAX_CONCURRENCY:-1}
+    volumes:
+      - ./:/app:ro
+    command: ["npm", "run", "start", "-w", "@radar-ia/bot"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    profiles: ["worker"]
+    image: node:20-bookworm
+    container_name: radar-ia-worker
+    working_dir: /app
+    restart: unless-stopped
+    network_mode: host
+    user: "node"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
+      SOURCES_REGISTRY_PATH: ${SOURCES_REGISTRY_PATH:-config/sources.json}
+      OLLAMA_BASE_URL: http://127.0.0.1:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-ministral-3:3b}
+      OLLAMA_MAX_CONCURRENCY: ${OLLAMA_MAX_CONCURRENCY:-1}
+      WORKER_SCHEDULER_ENABLED: ${WORKER_SCHEDULER_ENABLED:-true}
+      WORKER_CYCLE_INTERVAL_MS: ${WORKER_CYCLE_INTERVAL_MS:-900000}
+      WORKER_INITIAL_DELAY_MS: ${WORKER_INITIAL_DELAY_MS:-5000}
+      PIPELINE_LOCK_TTL_MS: ${PIPELINE_LOCK_TTL_MS:-300000}
+      PIPELINE_HEARTBEAT_INTERVAL_MS: ${PIPELINE_HEARTBEAT_INTERVAL_MS:-30000}
+      WORKER_HOLDER_PREFIX: ${WORKER_HOLDER_PREFIX:-worker}
+      RAW_FEED_RETENTION_PER_SOURCE: ${RAW_FEED_RETENTION_PER_SOURCE:-20}
+      RAW_FEED_RETENTION_DAYS: ${RAW_FEED_RETENTION_DAYS:-30}
+    volumes:
+      - ./:/app:ro
+    command: ["npm", "run", "start", "-w", "@radar-ia/worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+networks:
+  radar-ia:
+    name: radar-ia

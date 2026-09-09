@@ -1,0 +1,36 @@
+{
+  "sources": [
+    {
+      "id": "openai-news",
+      "name": "OpenAI News",
+      "url": "https://openai.com/news/rss.xml",
+      "tier": "S",
+      "enabled": true,
+      "provider": "rss"
+    },
+    {
+      "id": "huggingface-blog",
+      "name": "Hugging Face Blog",
+      "url": "https://huggingface.co/blog/feed.xml",
+      "tier": "D",
+      "enabled": false,
+      "provider": "rss"
+    },
+    {
+      "id": "example-html-stub",
+      "name": "Example HTML Stub (disabled)",
+      "url": "https://example.com/blog",
+      "tier": "E",
+      "enabled": false,
+      "provider": "html"
+    },
+    {
+      "id": "example-api-stub",
+      "name": "Example API Stub (disabled)",
+      "url": "https://example.com/api/announcements",
+      "tier": "E",
+      "enabled": false,
+      "provider": "api"
+    }
+  ]
+}

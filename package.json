@@ -1,0 +1,30 @@
+{
+  "name": "radar-ia",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Radar IA — monorepo npm Workspaces (bot Discord de veille IA)",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build": "npm run build -w @radar-ia/shared && npm run build -w @radar-ia/config && npm run build -w @radar-ia/analysis && npm run build -w @radar-ia/collector && npm run build -w @radar-ia/database && npm run build -w @radar-ia/api && npm run build -w @radar-ia/bot && npm run build -w @radar-ia/worker",
+    "clean": "npm run clean --workspaces --if-present",
+    "dev:worker": "npm run dev -w @radar-ia/worker",
+    "start:worker": "npm run start -w @radar-ia/worker",
+    "catch-up": "npm run build -w @radar-ia/worker && node --env-file=.env apps/worker/dist/catch-up.js --dry-run",
+    "catch-up:execute": "npm run build -w @radar-ia/worker && node --env-file=.env apps/worker/dist/catch-up.js --execute",
+    "prisma:generate": "npm run prisma:generate -w @radar-ia/database",
+    "prisma:validate": "npm run prisma:validate -w @radar-ia/database",
+    "prisma:migrate:deploy": "npm run prisma:migrate:deploy -w @radar-ia/database"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "~5.9.3"
+  }
+}
