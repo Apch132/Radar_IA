@@ -46,7 +46,7 @@ services:
       start_period: 10s
 
   bot:
-    image: node:26.8.2-bookworm
+    image: node:26.12.1-bookworm
     container_name: radar-ia-bot
     working_dir: /app
     restart: unless-stopped
@@ -76,7 +76,7 @@ services:
 
   worker:
     profiles: ["worker"]
-    image: node:26.8.2-bookworm
+    image: node:26.12.1-bookworm
     container_name: radar-ia-worker
     working_dir: /app
     restart: unless-stopped
